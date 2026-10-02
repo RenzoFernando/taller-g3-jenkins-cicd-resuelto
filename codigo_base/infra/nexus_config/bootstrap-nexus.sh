@@ -7,20 +7,22 @@ CI_USER="${NEXUS_CI_USER:-ci-publisher}"
 CI_PASSWORD="${NEXUS_CI_PASSWORD:-}"
 ADMIN_PASSWORD="${NEXUS_ADMIN_PASSWORD:-}"
 
-if [ -z "$ADMIN_PASSWORD" ]; then
-  printf "Nueva contraseña para admin de Nexus: " >&2
-  stty -echo
-  read ADMIN_PASSWORD
-  stty echo
+read_secret() {
+  prompt="$1"
+  printf "%s" "$prompt" >&2
+  if [ -t 0 ]; then stty -echo 2>/dev/null || true; fi
+  IFS= read -r value
+  if [ -t 0 ]; then stty echo 2>/dev/null || true; fi
   printf "\n" >&2
+  printf "%s" "$value"
+}
+
+if [ -z "$ADMIN_PASSWORD" ]; then
+  ADMIN_PASSWORD="$(read_secret 'Contraseña de admin de Nexus (actual, o la nueva si es el primer arranque): ')"
 fi
 
 if [ -z "$CI_PASSWORD" ]; then
-  printf "Contraseña para %s: " "$CI_USER" >&2
-  stty -echo
-  read CI_PASSWORD
-  stty echo
-  printf "\n" >&2
+  CI_PASSWORD="$(read_secret "Contraseña para $CI_USER: ")"
 fi
 
 printf "Esperando Nexus...\n"
@@ -28,13 +30,31 @@ until curl -fsS "$NEXUS_URL/service/rest/v1/status" >/dev/null 2>&1; do
   sleep 5
 done
 
-INITIAL_PASSWORD="$(docker exec nexus cat /nexus-data/admin.password 2>/dev/null || true)"
-if [ -n "$INITIAL_PASSWORD" ]; then
+# Git Bash/MSYS reescribe rutas /... de comandos Docker. Desactivamos esa conversión solo para docker exec.
+docker_cat_admin_password() {
+  case "$(uname -s 2>/dev/null || printf unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+      MSYS_NO_PATHCONV=1 docker exec nexus cat /nexus-data/admin.password 2>/dev/null || true
+      ;;
+    *)
+      docker exec nexus cat /nexus-data/admin.password 2>/dev/null || true
+      ;;
+  esac
+}
+
+# Si la contraseña actual ya funciona, el bootstrap es reejecutable y no intenta reutilizar la clave inicial.
+if curl -fsS -u "admin:$ADMIN_PASSWORD" "$NEXUS_URL/service/rest/v1/status" >/dev/null 2>&1; then
+  printf "Credencial admin de Nexus ya configurada.\n"
+else
+  INITIAL_PASSWORD="$(docker_cat_admin_password)"
+  if [ -z "$INITIAL_PASSWORD" ]; then
+    printf "ERROR: no fue posible autenticar admin y tampoco leer /nexus-data/admin.password.\n" >&2
+    exit 1
+  fi
+
   curl -fsS -u "admin:$INITIAL_PASSWORD" \
     -X PUT -H 'Content-Type: text/plain' --data-binary "$ADMIN_PASSWORD" \
     "$NEXUS_URL/service/rest/v1/security/users/admin/change-password" >/dev/null
-else
-  curl -fsS -u "admin:$ADMIN_PASSWORD" "$NEXUS_URL/service/rest/v1/status" >/dev/null
 fi
 
 AUTH="admin:$ADMIN_PASSWORD"

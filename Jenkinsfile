@@ -4,6 +4,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout(true)
     }
 
     triggers {
@@ -11,15 +12,16 @@ pipeline {
     }
 
     environment {
+        APP_DIR = "pending"
+        GIT_COMMIT_SHORT = "pending"
         IMAGE_TAG = "pending"
         MAVEN_VERSION = "pending"
-        APP_DIR = "."
 
-        // Docker CLI en Jenkins usa el socket del host. El daemon del host hace push/pull.
-        NEXUS_REGISTRY = "localhost:9080"
-
-        // Maven sí corre dentro del contenedor Jenkins y alcanza Nexus por la red cicd_network.
+        // Maven corre dentro del contenedor Jenkins y alcanza Nexus por la red cicd_network.
         NEXUS_MAVEN_REPO = "http://nexus:8081/repository/maven-releases/"
+
+        // El Docker CLI de Jenkins usa el socket del host. El daemon del host ve el registry publicado en localhost:9080.
+        NEXUS_REGISTRY = "localhost:9080"
 
         NEXUS_CREDENTIALS_ID = "nexus-credentials"
         VITE_API_URL = "http://localhost:8080"
@@ -31,21 +33,39 @@ pipeline {
                 checkout scm
 
                 script {
-                    env.APP_DIR = fileExists('codigo_base/backend/pom.xml') ? 'codigo_base' : '.'
-                    echo "APP_DIR=${env.APP_DIR}"
+                    def detectedAppDir = sh(
+                        script: '''
+                            if [ -f codigo_base/backend/pom.xml ]; then
+                              printf 'codigo_base'
+                            elif [ -f backend/pom.xml ]; then
+                              printf '.'
+                            else
+                              printf '__MISSING__'
+                            fi
+                        ''',
+                        returnStdout: true
+                    ).trim()
 
+                    if (detectedAppDir == '__MISSING__') {
+                        error('No se encontró backend/pom.xml ni codigo_base/backend/pom.xml en el workspace de Jenkins.')
+                    }
+
+                    env.APP_DIR = detectedAppDir
                     env.GIT_COMMIT_SHORT = sh(
                         script: 'git rev-parse --short=8 HEAD',
                         returnStdout: true
                     ).trim()
                     env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
                     env.MAVEN_VERSION = "1.0.${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
+
+                    echo "APP_DIR=${env.APP_DIR}"
+                    echo "GIT_COMMIT_SHORT=${env.GIT_COMMIT_SHORT}"
                     echo "IMAGE_TAG=${env.IMAGE_TAG}"
                     echo "MAVEN_VERSION=${env.MAVEN_VERSION}"
                 }
 
                 dir("${env.APP_DIR}/backend") {
-                    sh 'mvn -B test -Drevision="${MAVEN_VERSION}"'
+                    sh 'mvn -B -ntp test -Drevision="$MAVEN_VERSION"'
                 }
             }
         }
@@ -53,19 +73,19 @@ pipeline {
         stage('Package & Tag Inmutable') {
             steps {
                 dir("${env.APP_DIR}/backend") {
-                    sh 'mvn -B clean package -DskipTests -Drevision="${MAVEN_VERSION}"'
+                    sh 'mvn -B -ntp clean package -DskipTests -Drevision="$MAVEN_VERSION"'
                     sh '''
                         docker build \
-                          --build-arg APP_VERSION="${MAVEN_VERSION}" \
-                          -t "${NEXUS_REGISTRY}/studytrack-api:${IMAGE_TAG}" .
+                          --build-arg APP_VERSION="$MAVEN_VERSION" \
+                          -t "$NEXUS_REGISTRY/studytrack-api:$IMAGE_TAG" .
                     '''
                 }
 
                 dir("${env.APP_DIR}/frontend") {
                     sh '''
                         docker build \
-                          --build-arg VITE_API_URL="${VITE_API_URL}" \
-                          -t "${NEXUS_REGISTRY}/studytrack-frontend:${IMAGE_TAG}" .
+                          --build-arg VITE_API_URL="$VITE_API_URL" \
+                          -t "$NEXUS_REGISTRY/studytrack-frontend:$IMAGE_TAG" .
                     '''
                 }
             }
@@ -80,9 +100,9 @@ pipeline {
                 )]) {
                     dir("${env.APP_DIR}/backend") {
                         sh '''
-                            mvn -B deploy -DskipTests \
-                              -Drevision="${MAVEN_VERSION}" \
-                              -Dnexus.maven.repo="${NEXUS_MAVEN_REPO}" \
+                            mvn -B -ntp deploy -DskipTests \
+                              -Drevision="$MAVEN_VERSION" \
+                              -Dnexus.maven.repo="$NEXUS_MAVEN_REPO" \
                               -s settings.xml
                         '''
                     }
@@ -90,13 +110,14 @@ pipeline {
                     sh '''
                         set +x
                         export DOCKER_CONFIG="$WORKSPACE/.docker-tmp"
+                        rm -rf "$DOCKER_CONFIG"
                         mkdir -p "$DOCKER_CONFIG"
                         AUTH="$(printf '%s:%s' "$NEXUS_USER" "$NEXUS_PASS" | base64 | tr -d '\n')"
                         printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$NEXUS_REGISTRY" "$AUTH" > "$DOCKER_CONFIG/config.json"
                         set -x
 
-                        docker push "${NEXUS_REGISTRY}/studytrack-api:${IMAGE_TAG}"
-                        docker push "${NEXUS_REGISTRY}/studytrack-frontend:${IMAGE_TAG}"
+                        docker push "$NEXUS_REGISTRY/studytrack-api:$IMAGE_TAG"
+                        docker push "$NEXUS_REGISTRY/studytrack-frontend:$IMAGE_TAG"
 
                         set +x
                         rm -rf "$DOCKER_CONFIG"
@@ -115,14 +136,17 @@ pipeline {
                     sh '''
                         set +x
                         export DOCKER_CONFIG="$WORKSPACE/.docker-tmp"
+                        rm -rf "$DOCKER_CONFIG"
                         mkdir -p "$DOCKER_CONFIG"
                         AUTH="$(printf '%s:%s' "$NEXUS_USER" "$NEXUS_PASS" | base64 | tr -d '\n')"
                         printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$NEXUS_REGISTRY" "$AUTH" > "$DOCKER_CONFIG/config.json"
                         set -x
 
-                        export NEXUS_REGISTRY="${NEXUS_REGISTRY}"
-                        export IMAGE_TAG="${IMAGE_TAG}"
-                        COMPOSE_FILE="${APP_DIR}/deploy/docker-compose.yml"
+                        export NEXUS_REGISTRY="$NEXUS_REGISTRY"
+                        export IMAGE_TAG="$IMAGE_TAG"
+                        COMPOSE_FILE="$APP_DIR/deploy/docker-compose.yml"
+
+                        test -f "$COMPOSE_FILE"
 
                         docker compose -f "$COMPOSE_FILE" down --remove-orphans || true
                         docker compose -f "$COMPOSE_FILE" pull
@@ -160,7 +184,7 @@ pipeline {
             echo "Pipeline finalizado en verde. Artefactos publicados con tag: ${env.IMAGE_TAG}"
         }
         failure {
-            echo "El pipeline falló. Revise los logs de la etapa correspondiente antes de reintentar."
+            echo "El pipeline falló. Revise la PRIMERA etapa roja; las posteriores pueden aparecer omitidas por arrastre."
         }
         always {
             sh 'rm -rf "$WORKSPACE/.docker-tmp" || true'

@@ -1,4 +1,3 @@
-# ---------- Stage 1: Builder ----------
 FROM maven:3.9.6-eclipse-temurin-17-alpine AS builder
 WORKDIR /workspace
 
@@ -8,9 +7,8 @@ COPY pom.xml ./
 RUN mvn -B -q -DskipTests dependency:go-offline
 
 COPY src ./src
-RUN mvn -B clean package -DskipTests -Drevision="${APP_VERSION}"
+RUN mvn -B -ntp clean package -DskipTests -Drevision="${APP_VERSION}"
 
-# ---------- Stage 2: Runtime ----------
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
