@@ -1,0 +1,13 @@
+.DS_Store
+
+# Local secrets / environment
+**/.env
+!**/.env.example
+
+# Build outputs
+**/target/
+**/dist/
+**/node_modules/
+
+# Temporary Jenkins Docker credentials
+**/.docker-tmp/

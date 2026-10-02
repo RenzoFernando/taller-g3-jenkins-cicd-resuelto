@@ -1,0 +1,29 @@
+services:
+  nexus:
+    image: sonatype/nexus3:3.68.1
+    container_name: nexus
+    restart: unless-stopped
+    networks:
+      - cicd_network
+    ports:
+      - "${NEXUS_UI_PORT:-9081}:8081"
+      - "${NEXUS_DOCKER_REGISTRY_PORT:-9080}:${NEXUS_DOCKER_REGISTRY_PORT:-9080}"
+    volumes:
+      - nexus_data:/nexus-data
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: >-
+        -Xms512m -Xmx1024m -XX:MaxDirectMemorySize=1024m
+        -Djava.util.prefs.userRoot=/nexus-data/javaprefs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/service/rest/v1/status >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+networks:
+  cicd_network:
+    name: cicd_network
+
+volumes:
+  nexus_data:

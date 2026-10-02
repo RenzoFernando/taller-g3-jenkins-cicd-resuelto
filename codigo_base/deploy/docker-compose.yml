@@ -1,0 +1,31 @@
+services:
+  backend:
+    image: "${NEXUS_REGISTRY:-localhost:9080}/studytrack-api:${IMAGE_TAG}"
+    container_name: studytrack-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - product-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/tasks >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  frontend:
+    image: "${NEXUS_REGISTRY:-localhost:9080}/studytrack-frontend:${IMAGE_TAG}"
+    container_name: studytrack-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - product-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  product-network:
+    driver: bridge
