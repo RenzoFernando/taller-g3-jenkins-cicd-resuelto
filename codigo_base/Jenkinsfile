@@ -12,15 +12,14 @@ pipeline {
     }
 
     environment {
-        APP_DIR = "pending"
-        GIT_COMMIT_SHORT = "pending"
-        IMAGE_TAG = "pending"
-        MAVEN_VERSION = "pending"
+        // En ESTE repositorio la aplicación está siempre dentro de codigo_base/.
+        // Se deja fija para evitar sombreado de variables del bloque environment.
+        APP_DIR = "codigo_base"
 
         // Maven corre dentro del contenedor Jenkins y alcanza Nexus por la red cicd_network.
         NEXUS_MAVEN_REPO = "http://nexus:8081/repository/maven-releases/"
 
-        // El Docker CLI de Jenkins usa el socket del host. El daemon del host ve el registry publicado en localhost:9080.
+        // El Docker CLI de Jenkins usa el socket del host. El daemon del host ve el registry en localhost:9080.
         NEXUS_REGISTRY = "localhost:9080"
 
         NEXUS_CREDENTIALS_ID = "nexus-credentials"
@@ -33,24 +32,18 @@ pipeline {
                 checkout scm
 
                 script {
-                    def detectedAppDir = sh(
-                        script: '''
-                            if [ -f codigo_base/backend/pom.xml ]; then
-                              printf 'codigo_base'
-                            elif [ -f backend/pom.xml ]; then
-                              printf '.'
-                            else
-                              printf '__MISSING__'
-                            fi
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    if (detectedAppDir == '__MISSING__') {
-                        error('No se encontró backend/pom.xml ni codigo_base/backend/pom.xml en el workspace de Jenkins.')
+                    if (!fileExists("${env.APP_DIR}/backend/pom.xml")) {
+                        error("No existe ${env.APP_DIR}/backend/pom.xml en el workspace. Revise la estructura del repositorio.")
+                    }
+                    if (!fileExists("${env.APP_DIR}/frontend/Dockerfile")) {
+                        error("No existe ${env.APP_DIR}/frontend/Dockerfile en el workspace.")
+                    }
+                    if (!fileExists("${env.APP_DIR}/deploy/docker-compose.yml")) {
+                        error("No existe ${env.APP_DIR}/deploy/docker-compose.yml en el workspace.")
                     }
 
-                    env.APP_DIR = detectedAppDir
+                    // Estas variables NO se declaran arriba en environment{}, porque Jenkins
+                    // no permite sobrescribir de forma fiable variables declarativas con env.VAR.
                     env.GIT_COMMIT_SHORT = sh(
                         script: 'git rev-parse --short=8 HEAD',
                         returnStdout: true
@@ -142,12 +135,10 @@ pipeline {
                         printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$NEXUS_REGISTRY" "$AUTH" > "$DOCKER_CONFIG/config.json"
                         set -x
 
-                        export NEXUS_REGISTRY="$NEXUS_REGISTRY"
-                        export IMAGE_TAG="$IMAGE_TAG"
                         COMPOSE_FILE="$APP_DIR/deploy/docker-compose.yml"
-
                         test -f "$COMPOSE_FILE"
 
+                        export NEXUS_REGISTRY IMAGE_TAG
                         docker compose -f "$COMPOSE_FILE" down --remove-orphans || true
                         docker compose -f "$COMPOSE_FILE" pull
                         docker compose -f "$COMPOSE_FILE" up -d
@@ -168,7 +159,22 @@ pipeline {
                           exit 1
                         fi
 
-                        curl -fsS http://host.docker.internal:3000/ >/dev/null
+                        ok=0
+                        for i in $(seq 1 12); do
+                          if curl -fsS http://host.docker.internal:3000/ >/dev/null; then
+                            ok=1
+                            break
+                          fi
+                          echo "Smoke test frontend: intento $i/12"
+                          sleep 3
+                        done
+
+                        if [ "$ok" -ne 1 ]; then
+                          docker compose -f "$COMPOSE_FILE" ps
+                          docker compose -f "$COMPOSE_FILE" logs --no-color
+                          exit 1
+                        fi
+
                         docker compose -f "$COMPOSE_FILE" ps
 
                         set +x
